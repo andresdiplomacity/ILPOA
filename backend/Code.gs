@@ -8,7 +8,7 @@
 const SHEET_ID = '18qg93cGRIY2YKEs2G3YNo-OHZargCL_gjNesFLNUHi0';
 const REQUESTS_SHEET = 'Requests';
 const MEMBERS_SHEET = 'Members';
-const TOKEN_TTL_MINUTES = 30;
+const HASH_ROUNDS = 1000; // simple stretching - Apps Script has no native slow-hash function
 
 function getAdminEmail() {
   return PropertiesService.getScriptProperties().getProperty('ADMIN_EMAIL') || Session.getEffectiveUser().getEmail();
@@ -28,18 +28,33 @@ function getSheet(name) {
   return sheet;
 }
 
-/** Run this once manually from the Apps Script editor to create headers and trigger the auth prompt. */
+/** Run this once manually from the Apps Script editor (and again after schema changes) to (re)write headers and trigger the auth prompt. Safe to re-run - it never touches existing data rows. */
 function ensureHeaders() {
   const req = getSheet(REQUESTS_SHEET);
-  if (req.getRange(1, 1).getValue() === '') {
-    req.getRange(1, 1, 1, 8).setValues([['Timestamp', 'First Name', 'Last Name', 'Email', 'Phone', 'Address', 'Status', 'Processed At']]);
-    req.setFrozenRows(1);
-  }
+  req.getRange(1, 1, 1, 10).setValues([['Timestamp', 'First Name', 'Last Name', 'Email', 'Phone', 'Address', 'Status', 'Processed At', 'Password Hash', 'Password Salt']]);
+  req.setFrozenRows(1);
+
   const mem = getSheet(MEMBERS_SHEET);
-  if (mem.getRange(1, 1).getValue() === '') {
-    mem.getRange(1, 1, 1, 8).setValues([['First Name', 'Last Name', 'Email', 'Phone', 'Address', 'Approved At', 'Login Token', 'Token Expiry']]);
-    mem.setFrozenRows(1);
+  mem.getRange(1, 1, 1, 8).setValues([['First Name', 'Last Name', 'Email', 'Phone', 'Address', 'Approved At', 'Password Hash', 'Password Salt']]);
+  mem.setFrozenRows(1);
+}
+
+// ===== Password hashing =====
+// Salted, stretched SHA-256. Not as strong as bcrypt/argon2 (Apps Script has
+// no native slow-hash function), but proportionate here - plaintext is never
+// stored, and this is a low-stakes community site, not a bank.
+
+function makeSalt() {
+  return Utilities.getUuid();
+}
+
+function hashPassword(password, salt) {
+  let bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + password);
+  for (let i = 0; i < HASH_ROUNDS; i++) {
+    const asString = bytes.map((b) => String.fromCharCode((b + 256) % 256)).join('');
+    bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + asString);
   }
+  return bytes.map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
 }
 
 // ===== Web app entry point =====
@@ -55,8 +70,7 @@ function doPost(e) {
   try {
     switch (body.action) {
       case 'request_access': return handleRequestAccess(body);
-      case 'request_login': return handleRequestLogin(body);
-      case 'verify_token': return handleVerifyToken(body);
+      case 'login': return handleLogin(body);
       default: return jsonOut({ ok: false, error: 'unknown_action' });
     }
   } catch (err) {
@@ -85,9 +99,13 @@ function handleRequestAccess(body) {
   const email = (body.email || '').trim().toLowerCase();
   const phone = (body.phone || '').trim();
   const address = (body.address || '').trim();
+  const password = body.password || '';
 
-  if (!firstName || !lastName || !email || !phone || !address) {
+  if (!firstName || !lastName || !email || !phone || !address || !password) {
     return jsonOut({ ok: false, error: 'missing_fields' });
+  }
+  if (password.length < 6) {
+    return jsonOut({ ok: false, error: 'weak_password' });
   }
   if (findMemberRow(email) > 0) {
     return jsonOut({ ok: false, error: 'already_member' });
@@ -101,7 +119,9 @@ function handleRequestAccess(body) {
     }
   }
 
-  req.appendRow([new Date(), firstName, lastName, email, phone, address, 'Pending', '']);
+  const salt = makeSalt();
+  const hash = hashPassword(password, salt);
+  req.appendRow([new Date(), firstName, lastName, email, phone, address, 'Pending', '', hash, salt]);
 
   MailApp.sendEmail({
     to: getAdminEmail(),
@@ -117,49 +137,25 @@ function handleRequestAccess(body) {
   return jsonOut({ ok: true });
 }
 
-function handleRequestLogin(body) {
+function handleLogin(body) {
   const email = (body.email || '').trim().toLowerCase();
-  if (!email) return jsonOut({ ok: true }); // never reveal whether an email is registered
+  const password = body.password || '';
+  const genericError = jsonOut({ ok: false, error: 'invalid_credentials' });
+  if (!email || !password) return genericError;
 
   const rowIndex = findMemberRow(email);
-  if (rowIndex > 0) {
-    const mem = getSheet(MEMBERS_SHEET);
-    const token = Utilities.getUuid();
-    const expiry = new Date(Date.now() + TOKEN_TTL_MINUTES * 60 * 1000);
-    mem.getRange(rowIndex, 7).setValue(token);
-    mem.getRange(rowIndex, 8).setValue(expiry);
-
-    const firstName = mem.getRange(rowIndex, 1).getValue();
-    const base = getSiteUrl();
-    const loginUrl = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'login_token=' + encodeURIComponent(token);
-    MailApp.sendEmail({
-      to: email,
-      subject: 'Your Island Lake Association login link',
-      body: `Hi ${firstName},\n\nClick this link to sign in (valid for ${TOKEN_TTL_MINUTES} minutes):\n${loginUrl}\n\nIf you didn't request this, you can ignore this email.\n\n— Island Lake Association`
-    });
-  }
-  return jsonOut({ ok: true });
-}
-
-function handleVerifyToken(body) {
-  const token = (body.token || '').trim();
-  if (!token) return jsonOut({ ok: false });
+  if (rowIndex < 0) return genericError;
 
   const mem = getSheet(MEMBERS_SHEET);
-  const data = mem.getDataRange().getValues();
-  const now = new Date();
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][6] === token) {
-      const expiry = data[i][7];
-      if (expiry && new Date(expiry) > now) {
-        mem.getRange(i + 1, 7).setValue('');
-        mem.getRange(i + 1, 8).setValue('');
-        return jsonOut({ ok: true, member: { firstName: data[i][0], lastName: data[i][1], email: data[i][2] } });
-      }
-      return jsonOut({ ok: false, error: 'expired' });
-    }
-  }
-  return jsonOut({ ok: false, error: 'invalid' });
+  const storedHash = mem.getRange(rowIndex, 7).getValue();
+  const storedSalt = mem.getRange(rowIndex, 8).getValue();
+  if (!storedHash || !storedSalt) return genericError;
+
+  if (hashPassword(password, storedSalt) !== storedHash) return genericError;
+
+  const firstName = mem.getRange(rowIndex, 1).getValue();
+  const lastName = mem.getRange(rowIndex, 2).getValue();
+  return jsonOut({ ok: true, member: { firstName, lastName, email } });
 }
 
 // ===== Installable trigger =====
@@ -178,17 +174,18 @@ function onStatusEdit(e) {
   const processedCell = sheet.getRange(row, 8);
   if (processedCell.getValue()) return; // already processed - avoid double-sending
 
-  const rowData = sheet.getRange(row, 1, 1, 6).getValues()[0];
+  const rowData = sheet.getRange(row, 1, 1, 10).getValues()[0];
   const firstName = rowData[1], lastName = rowData[2], email = rowData[3], phone = rowData[4], address = rowData[5];
+  const passwordHash = rowData[8], passwordSalt = rowData[9];
 
   if (newStatus === 'Approved') {
     if (findMemberRow(email) < 0) {
-      getSheet(MEMBERS_SHEET).appendRow([firstName, lastName, email, phone, address, new Date(), '', '']);
+      getSheet(MEMBERS_SHEET).appendRow([firstName, lastName, email, phone, address, new Date(), passwordHash, passwordSalt]);
     }
     MailApp.sendEmail({
       to: email,
       subject: 'Your Island Lake Association account is approved',
-      body: `Hi ${firstName},\n\nYour member access request has been approved. Visit the site and use "Sign in" with your email (${email}) to receive a one-time login link.\n\n${getSiteUrl()}\n\n— Island Lake Association`
+      body: `Hi ${firstName},\n\nYour member access request has been approved. Visit the site and sign in with your email (${email}) and the password you chose when you requested access.\n\n${getSiteUrl()}\n\n— Island Lake Association`
     });
   } else {
     MailApp.sendEmail({
