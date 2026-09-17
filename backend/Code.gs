@@ -5,6 +5,7 @@
  * called from the website via fetch(). See ../backend/SETUP.md.
  */
 
+const SHEET_ID = '18qg93cGRIY2YKEs2G3YNo-OHZargCL_gjNesFLNUHi0';
 const REQUESTS_SHEET = 'Requests';
 const MEMBERS_SHEET = 'Members';
 const TOKEN_TTL_MINUTES = 30;
@@ -18,7 +19,10 @@ function getSiteUrl() {
 }
 
 function getSheet(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // getActiveSpreadsheet() only resolves inside an editor/UI context - a Web
+  // App request has none, so it returns null there even for a bound script.
+  // openById works the same in every context (editor, trigger, or Web App).
+  const ss = SpreadsheetApp.openById(SHEET_ID);
   let sheet = ss.getSheetByName(name);
   if (!sheet) sheet = ss.insertSheet(name);
   return sheet;
