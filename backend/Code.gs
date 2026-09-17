@@ -9,6 +9,7 @@ const SHEET_ID = '18qg93cGRIY2YKEs2G3YNo-OHZargCL_gjNesFLNUHi0';
 const REQUESTS_SHEET = 'Requests';
 const MEMBERS_SHEET = 'Members';
 const HASH_ROUNDS = 1000; // simple stretching - Apps Script has no native slow-hash function
+const RESET_TTL_MINUTES = 30;
 
 function getAdminEmail() {
   return PropertiesService.getScriptProperties().getProperty('ADMIN_EMAIL') || Session.getEffectiveUser().getEmail();
@@ -35,7 +36,7 @@ function ensureHeaders() {
   req.setFrozenRows(1);
 
   const mem = getSheet(MEMBERS_SHEET);
-  mem.getRange(1, 1, 1, 8).setValues([['First Name', 'Last Name', 'Email', 'Phone', 'Address', 'Approved At', 'Password Hash', 'Password Salt']]);
+  mem.getRange(1, 1, 1, 10).setValues([['First Name', 'Last Name', 'Email', 'Phone', 'Address', 'Approved At', 'Password Hash', 'Password Salt', 'Reset Token', 'Reset Token Expiry']]);
   mem.setFrozenRows(1);
 }
 
@@ -71,6 +72,8 @@ function doPost(e) {
     switch (body.action) {
       case 'request_access': return handleRequestAccess(body);
       case 'login': return handleLogin(body);
+      case 'request_password_reset': return handleRequestPasswordReset(body);
+      case 'reset_password': return handleResetPassword(body);
       default: return jsonOut({ ok: false, error: 'unknown_action' });
     }
   } catch (err) {
@@ -156,6 +159,57 @@ function handleLogin(body) {
   const firstName = mem.getRange(rowIndex, 1).getValue();
   const lastName = mem.getRange(rowIndex, 2).getValue();
   return jsonOut({ ok: true, member: { firstName, lastName, email } });
+}
+
+function handleRequestPasswordReset(body) {
+  const email = (body.email || '').trim().toLowerCase();
+  if (!email) return jsonOut({ ok: true }); // never reveal whether an email is registered
+
+  const rowIndex = findMemberRow(email);
+  if (rowIndex > 0) {
+    const mem = getSheet(MEMBERS_SHEET);
+    const token = Utilities.getUuid();
+    const expiry = new Date(Date.now() + RESET_TTL_MINUTES * 60 * 1000);
+    mem.getRange(rowIndex, 9).setValue(token);
+    mem.getRange(rowIndex, 10).setValue(expiry);
+
+    const firstName = mem.getRange(rowIndex, 1).getValue();
+    const base = getSiteUrl();
+    const resetUrl = base + (base.indexOf('?') >= 0 ? '&' : '?') + 'reset_token=' + encodeURIComponent(token);
+    MailApp.sendEmail({
+      to: email,
+      subject: 'Reset your Island Lake Association password',
+      body: `Hi ${firstName},\n\nClick this link to set a new password (valid for ${RESET_TTL_MINUTES} minutes):\n${resetUrl}\n\nIf you didn't request this, you can ignore this email - your password will stay the same.\n\n— Island Lake Association`
+    });
+  }
+  return jsonOut({ ok: true });
+}
+
+function handleResetPassword(body) {
+  const token = (body.token || '').trim();
+  const newPassword = body.newPassword || '';
+  if (!token || !newPassword) return jsonOut({ ok: false, error: 'missing_fields' });
+  if (newPassword.length < 6) return jsonOut({ ok: false, error: 'weak_password' });
+
+  const mem = getSheet(MEMBERS_SHEET);
+  const data = mem.getDataRange().getValues();
+  const now = new Date();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][8] === token) {
+      const expiry = data[i][9];
+      if (!expiry || new Date(expiry) <= now) return jsonOut({ ok: false, error: 'expired' });
+
+      const salt = makeSalt();
+      const hash = hashPassword(newPassword, salt);
+      const row = i + 1;
+      mem.getRange(row, 7).setValue(hash);
+      mem.getRange(row, 8).setValue(salt);
+      mem.getRange(row, 9).setValue('');
+      mem.getRange(row, 10).setValue('');
+      return jsonOut({ ok: true });
+    }
+  }
+  return jsonOut({ ok: false, error: 'invalid' });
 }
 
 // ===== Installable trigger =====
