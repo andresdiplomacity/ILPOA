@@ -19,13 +19,14 @@
     'ila-members': 'images/members.jpg',
     'ila-contact': 'images/contact.jpg',
     'ila-album-1': 'images/album-morning-mist.jpg',
-    // 'ila-album-2': 'images/album-canoeing.jpg',   // Canoeing - no photo yet
+    'ila-album-2': 'images/album-canoeing.jpg',
     'ila-album-3': 'images/album-sun-on-water.jpg',
     'ila-album-4': 'images/album-the-ridge.jpg',
     'ila-album-5': 'images/album-wildlife.jpg',
     'ila-album-6': 'images/album-fall-colours.jpg',
-    // 'ila-album-7': 'images/album-wildflowers.jpg', // Wildflowers - no photo yet
-    'ila-album-8': 'images/album-winter-skating.jpg'
+    'ila-album-7': 'images/album-mushrooms-1.jpg',
+    'ila-album-8': 'images/album-winter-skating.jpg',
+    'ila-album-9': 'images/album-mushrooms-2.jpg'
   };
 
   var FORCE_VISIBLE_STYLE =
