@@ -13,8 +13,25 @@
  * add a line below with the slot id and image path.
  */
 (function () {
+  // Hero photo rotates with the season (Northern Hemisphere, based on the
+  // visitor's local device date) so the homepage always shows a photo that
+  // matches what Island Lake actually looks like right now.
+  var SEASONAL_HERO = {
+    winter: 'images/album-winter-skating.jpg', // Dec, Jan, Feb
+    spring: 'images/album-morning-mist.jpg',   // Mar, Apr, May
+    summer: 'images/album-canoeing.jpg',       // Jun, Jul, Aug
+    fall: 'images/hero.jpg'                    // Sep, Oct, Nov
+  };
+  function currentSeason() {
+    var month = new Date().getMonth(); // 0 = January
+    if (month === 11 || month <= 1) return 'winter';
+    if (month <= 4) return 'spring';
+    if (month <= 7) return 'summer';
+    return 'fall';
+  }
+
   var IMAGES = {
-    'ila-hero': 'images/hero.jpg',
+    'ila-hero': SEASONAL_HERO[currentSeason()],
     'ila-hood': 'images/hood.jpg',
     'ila-members': 'images/members.jpg',
     'ila-contact': 'images/contact.jpg',
